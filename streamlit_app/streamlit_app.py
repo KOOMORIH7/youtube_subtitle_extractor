@@ -2,11 +2,13 @@ import streamlit as st
 import yt_dlp
 import re
 import os
+from io import BytesIO
 from openpyxl import Workbook
 from docx import Document
-import tempfile
 
+# --------------------------
 # 字幕抽出関数
+# --------------------------
 def extract_subtitles(subtitle_file, keywords, use_censored):
     matches = []
     with open(subtitle_file, "r", encoding="utf-8") as f:
@@ -22,63 +24,71 @@ def extract_subtitles(subtitle_file, keywords, use_censored):
                         matches.append((timestamp, text))
                         break
             elif use_censored:
-                if re.search(r"\[\s*__\s*\]", text):
+                if "[__]" in text.replace(" ",""):
                     matches.append((timestamp, text))
     return matches
 
-# 安全なファイル名作成
+# --------------------------
+# 安全なファイル名
+# --------------------------
 def safe_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
-# 保存処理
-def save_matches(matches, title, folder, fmt):
+# --------------------------
+# ファイル生成
+# --------------------------
+def generate_file(matches, title, fmt):
     safe_title = safe_filename(title)
-    filepath = os.path.join(folder, f"{safe_title}.{fmt.lower()}")
     
     if fmt == "TXT":
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"=== {title} ===\n")
-            for t, txt in matches:
-                f.write(f"[{t}] {txt}\n")
-            f.write(f"\n合計 {len(matches)} 件\n")
+        output = "\n".join([f"[{t}] {txt}" for t, txt in matches])
+        return BytesIO(output.encode("utf-8")), f"{safe_title}.txt"
+    
     elif fmt == "Word":
         doc = Document()
         doc.add_heading(title, level=1)
         for t, txt in matches:
             doc.add_paragraph(f"[{t}] {txt}")
-        doc.add_paragraph(f"\n合計 {len(matches)} 件")
-        doc.save(filepath)
+        buffer = BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer, f"{safe_title}.docx"
+    
     elif fmt == "Excel":
         wb = Workbook()
         ws = wb.active
         ws.append(["Timestamp", "Text"])
         for t, txt in matches:
             ws.append([t, txt])
-        wb.save(filepath)
-    return filepath
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        return buffer, f"{safe_title}.xlsx"
 
-# ---------------- Streamlit UI ----------------
-st.title("YouTube 字幕抽出アプリ")
+# --------------------------
+# Streamlit UI
+# --------------------------
+st.title("YouTube 字幕抽出アプリ (ブラウザ版)")
 
 url = st.text_input("YouTube動画URL")
-folder = st.text_input("保存先フォルダ (例: C:/Users/...)")
-fmt = st.selectbox("保存形式", ["TXT", "Word", "Excel"])
 keywords_input = st.text_input("抽出キーワード（カンマ区切り）")
 use_censored = st.checkbox("[ __ ]を抽出")
+fmt = st.selectbox("保存形式", ["TXT", "Word", "Excel"])
 
 if st.button("抽出開始"):
-    if not url or not folder or (not keywords_input and not use_censored):
-        st.warning("URL・保存先・キーワードまたはチェックボックスは必須です")
+    if not url or (not keywords_input and not use_censored):
+        st.warning("URLとキーワードまたは[ __ ]チェックが必要です")
     else:
         keywords = [kw.strip() for kw in keywords_input.split(",") if kw.strip()] if keywords_input else []
-        st.info("📥 字幕抽出開始...")
+        st.info("📥 字幕抽出中...少々お待ちください")
+        
         try:
             # 動画情報取得
             with yt_dlp.YoutubeDL({}) as ydl_info:
                 info = ydl_info.extract_info(url, download=False)
             video_title = info.get("title", "untitled")
-            st.write(f"🎬 動画タイトル: {video_title}")
-            
+            st.success(f"🎬 動画タイトル: {video_title}")
+
             # 字幕ダウンロード
             ydl_opts = {
                 "skip_download": True,
@@ -99,8 +109,15 @@ if st.button("抽出開始"):
                 matches = extract_subtitles(subtitle_file, keywords, use_censored)
                 os.remove(subtitle_file)
                 
-                saved_path = save_matches(matches, video_title, folder, fmt)
-                st.success(f"✅ 保存完了: {saved_path} ({len(matches)} 件)")
+                if matches:
+                    buffer, filename = generate_file(matches, video_title, fmt)
+                    st.download_button(
+                        label=f"✅ {fmt}ファイルをダウンロード ({len(matches)} 件)",
+                        data=buffer,
+                        file_name=filename,
+                        mime="application/octet-stream"
+                    )
+                else:
+                    st.info("抽出結果は0件でした")
         except Exception as e:
             st.error(f"❌ エラー: {e}")
-
